@@ -33,6 +33,16 @@ import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.gift_init.gift_init as gift_init
 
+# EvoPlace hook integration (github.com/themoddedcube/evoplace).
+# When the evoplace project root is on sys.path (the evaluator harness puts it
+# there), evolved schedule functions registered in dreamplace_ext.hooks
+# override the default gamma / density-weight heuristics below. Standalone
+# DREAMPlace use is unaffected: the import fails silently and all hooks are None.
+try:
+    from dreamplace_ext import hooks as evoplace_hooks
+except ImportError:
+    evoplace_hooks = None
+
 
 class PreconditionOp:
     """Preconditioning engine is critical for convergence.
@@ -272,6 +282,10 @@ class PlaceObj(nn.Module):
                     num_movable_nodes=placedb.num_movable_nodes, 
                     scale=params.gift_init_scale
                     ) 
+
+        # EvoPlace: per-stage telemetry consumed by evolved schedule hooks
+        self._hook_hpwl_history = []
+        self._hook_overflow_history = []
 
         self.Lgamma_iteration = global_place_params["iteration"]
         if 'Llambda_density_weight_iteration' in global_place_params:
@@ -888,6 +902,39 @@ class PlaceObj(nn.Module):
         update_density_weight_op = {"hpwl":update_density_weight_op_hpwl,
                                     "overflow": update_density_weight_op_overflow}[algo]
 
+        # EvoPlace: an evolved lambda schedule, when registered, replaces the
+        # default density-weight update. Falls back to the default op on any
+        # invalid output so a bad candidate degrades instead of crashing.
+        if evoplace_hooks is not None:
+            default_op = update_density_weight_op
+
+            def update_density_weight_op_hooked(cur_metric, prev_metric, iteration):
+                lambda_fn = evoplace_hooks.get_lambda_schedule()
+                if lambda_fn is None:
+                    return default_op(cur_metric, prev_metric, iteration)
+                with torch.no_grad():
+                    overflow = float(torch.as_tensor(
+                        cur_metric.overflow).float().mean().item())
+                    self._hook_overflow_history.append(overflow)
+                    grad = self.data_collections.pos[0].grad
+                    gradient_norm = (float(grad.norm(p=2).item())
+                                     if grad is not None else 0.0)
+                    current_lambda = float(self.density_weight.mean().item())
+                    try:
+                        lam = float(lambda_fn(int(iteration), overflow,
+                                              self._hook_overflow_history,
+                                              gradient_norm, current_lambda))
+                    except Exception:
+                        logging.exception("evoplace lambda_schedule raised; "
+                                          "falling back to default heuristic")
+                        return default_op(cur_metric, prev_metric, iteration)
+                    if np.isfinite(lam) and lam > 0:
+                        self.density_weight.data.fill_(lam)
+                    else:
+                        return default_op(cur_metric, prev_metric, iteration)
+
+            return update_density_weight_op_hooked
+
         return update_density_weight_op
 
     def base_gamma(self, params, placedb):
@@ -910,6 +957,37 @@ class PlaceObj(nn.Module):
             overflow_avg = overflow
         else:
             overflow_avg = overflow
+
+        # EvoPlace: delegate to an evolved gamma schedule when one is registered.
+        # The hook returns a dimensionless gamma in [0.01, 20] (see
+        # evolve/initial_program.py); internal gamma carries bin-size units, so
+        # scale by (bin_size_x + bin_size_y) — the same scale as base_gamma.
+        if evoplace_hooks is not None:
+            gamma_fn = evoplace_hooks.get_gamma_schedule()
+            if gamma_fn is not None:
+                with torch.no_grad():
+                    hpwl = float(self.op_collections.hpwl_op(
+                        self.data_collections.pos[0]).item())
+                self._hook_hpwl_history.append(hpwl)
+                # Divergence proxy: HPWL has doubled vs the best seen this stage
+                if len(self._hook_hpwl_history) >= 10 and \
+                        hpwl > 2.0 * min(self._hook_hpwl_history):
+                    evoplace_hooks.record_divergence()
+                try:
+                    gamma_new = float(gamma_fn(
+                        int(iteration), int(self.Lgamma_iteration),
+                        float(overflow_avg.mean().item()),
+                        self._hook_hpwl_history))
+                except Exception:
+                    logging.exception("evoplace gamma_schedule raised; "
+                                      "falling back to default heuristic")
+                    gamma_new = float("nan")
+                if np.isfinite(gamma_new) and gamma_new > 0:
+                    self.gamma.data.fill_(
+                        gamma_new * (self.bin_size_x + self.bin_size_y))
+                    return True
+                # invalid hook output: fall through to the default heuristic
+
         coef = torch.pow(10, (overflow_avg - 0.1) * 20 / 9 - 1)
         self.gamma.data.fill_((base_gamma * coef).item())
         return True
