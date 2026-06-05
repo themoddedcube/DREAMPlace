@@ -334,6 +334,20 @@ class PlaceObj(nn.Module):
         else:
             result = torch.add(self.wirelength, self.density, alpha=(self.density_factor * self.density_weight).item())
 
+        # Covenant: additional differentiable objective term (RUDY routability
+        # penalty, timing loss, ...) registered via the hook layer. Failures
+        # degrade to the stock objective instead of crashing the run.
+        if evoplace_hooks is not None:
+            term_fn = getattr(evoplace_hooks, "get_objective_term", lambda: None)()
+            if term_fn is not None:
+                try:
+                    extra = term_fn(pos, self)
+                except Exception:
+                    logging.exception("covenant objective term raised; ignored")
+                    extra = None
+                if extra is not None:
+                    result = result + extra
+
         return result
 
     def obj_and_grad_fn_old(self, pos_w, pos_g=None, admm_multiplier=None):

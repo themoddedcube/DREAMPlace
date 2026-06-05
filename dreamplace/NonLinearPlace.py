@@ -799,8 +799,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     # gradually reduce gamma to tradeoff smoothness and accuracy
                     if len(placedb.regions) > 0 and Llambda_metrics[-1][-1].goverflow is not None:
                         model.op_collections.update_gamma_op(Lgamma_step, Llambda_metrics[-1][-1].goverflow)
+                        # Covenant: keep the model-visible overflow history fed
+                        # (objective-term hooks use it for deferred activation)
+                        model.op_collections.precondition_op.set_overflow(Llambda_metrics[-1][-1].goverflow)
                     elif len(placedb.regions) == 0 and Llambda_metrics[-1][-1].overflow is not None:
                         model.op_collections.update_gamma_op(Lgamma_step, Llambda_metrics[-1][-1].overflow)
+                        model.op_collections.precondition_op.set_overflow(Llambda_metrics[-1][-1].overflow)
                     else:
                         model.op_collections.precondition_op.set_overflow(Llambda_metrics[-1][-1].overflow)
                     if Lgamma_stop_criterion(Lgamma_step, Lgamma_metrics) or stop_placement == 1:
