@@ -31,7 +31,12 @@ add_subdirectory(adjust_node_area)
 # timing operator
 add_subdirectory(pin_weight_sum)
 add_subdirectory(timing)
-add_subdirectory(timing_heterosta)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  add_subdirectory(timing_heterosta)
+else()
+  # prebuilt HeteroSTA release ships x86-64 binaries only
+  message(STATUS "Skipping timing_heterosta: unsupported arch ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
 # gift initial placement 
 add_subdirectory(gift_init)
 
