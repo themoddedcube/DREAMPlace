@@ -639,6 +639,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 # currently do not check divergence in timing-driven placement
                                 # TODO: a better way for divergence detection and roll-back for tdp.
                                 div_flag = False
+                            if getattr(params, "covenant_disable_divergence_rollback", False):
+                                # Covenant audit flag: ablate divergence detection + rollback
+                                div_flag = False
                             if (
                                 len(placedb.regions) == 0
                                 and params.stop_overflow * 1.1 < overflow_list[-1] < params.stop_overflow * 4
@@ -671,12 +674,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 and check_plateau(overflow_list, window=15, threshold=0.001)
                             ):
                                 if overflow_list[-1] > 0.9:  # stuck at high overflow
-                                    model.quad_penalty = True
-                                    model.density_factor *= 2
-                                    logging.info(
-                                        f"Stuck at early stage. Turn on quadratic penalty with double density factor to accelerate convergence"
-                                    )
-                                    if overflow_list[-1] > 0.95:  # stuck at very high overflow
+                                    # Covenant audit flags: ablate the quad-penalty
+                                    # escalation and entropy injection independently.
+                                    if not getattr(params, "covenant_disable_plateau_quad", False):
+                                        model.quad_penalty = True
+                                        model.density_factor *= 2
+                                        logging.info(
+                                            f"Stuck at early stage. Turn on quadratic penalty with double density factor to accelerate convergence"
+                                        )
+                                    if overflow_list[-1] > 0.95 and not getattr(
+                                            params, "covenant_disable_entropy_injection", False):
+                                        # stuck at very high overflow
                                         noise_intensity = min(
                                             max(40 + (120 - 40) * (overflow_list[-1] - 0.95) * 10, 40), 90
                                         )

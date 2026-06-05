@@ -48,7 +48,8 @@ class PreconditionOp:
     """Preconditioning engine is critical for convergence.
     Need to be carefully designed.
     """
-    def __init__(self, placedb, data_collections, op_collections):
+    def __init__(self, placedb, data_collections, op_collections,
+                 disable_alpha_doubling=False):
         self.placedb = placedb
         self.data_collections = data_collections
         self.op_collections = op_collections
@@ -56,6 +57,8 @@ class PreconditionOp:
         self.alpha = 1.0
         self.best_overflow = None
         self.overflows = []
+        # Covenant audit flag: freeze alpha (ablate the doubling heuristic)
+        self.disable_alpha_doubling = disable_alpha_doubling
         if len(placedb.regions) > 0:
             self.movablenode2fence_region_map_clamp = (
                 data_collections.node2fence_region_map[: placedb.num_movable_nodes]
@@ -131,7 +134,7 @@ class PreconditionOp:
             self.iteration += 1
 
             # only work in benchmarks without fence region, assume overflow has been updated
-            if len(self.placedb.regions) > 0 and self.overflows and self.overflows[-1].max() < 0.3 and self.alpha < 1024:
+            if (not self.disable_alpha_doubling) and len(self.placedb.regions) > 0 and self.overflows and self.overflows[-1].max() < 0.3 and self.alpha < 1024:
                 if (self.iteration % 20) == 0:
                     self.alpha *= 2
                     logging.info(
@@ -899,6 +902,17 @@ class PlaceObj(nn.Module):
             logging.warning("for benchmark without fence region, density weight update is forced to be based on HPWL")
             algo = "hpwl"
 
+        # Covenant audit flag: force the lambda update mode, bypassing the
+        # coercions above (the point of the ablation). overflow mode still
+        # requires the quadratic penalty (the op asserts it).
+        forced_mode = getattr(params, "covenant_lambda_update_mode", None)
+        if forced_mode in ("hpwl", "overflow"):
+            if forced_mode == "overflow" and not self.quad_penalty:
+                logging.warning(
+                    "covenant_lambda_update_mode=overflow requires quad_penalty; keeping %s" % algo)
+            else:
+                algo = forced_mode
+
         update_density_weight_op = {"hpwl":update_density_weight_op_hpwl,
                                     "overflow": update_density_weight_op_overflow}[algo]
 
@@ -1044,7 +1058,10 @@ class PlaceObj(nn.Module):
         @param data_collections a collection of data and variables required for constructing ops
         @param op_collections a collection of all ops
         """
-        return PreconditionOp(placedb, data_collections, op_collections)
+        return PreconditionOp(
+            placedb, data_collections, op_collections,
+            disable_alpha_doubling=getattr(
+                params, "covenant_disable_precond_alpha_doubling", False))
 
     def build_route_utilization_map(self, params, placedb, data_collections):
         """
