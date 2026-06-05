@@ -958,6 +958,19 @@ class PlaceObj(nn.Module):
         else:
             overflow_avg = overflow
 
+        # EvoPlace: apply deferred path-group net weights (Exp 4, Variant A)
+        # once overflow first crosses the activation threshold. Independent of
+        # the gamma hook — fires whenever weights were registered.
+        if evoplace_hooks is not None:
+            _w = evoplace_hooks.pop_deferred_net_weights_if_triggered(
+                float(overflow_avg.mean().item()))
+            if _w is not None:
+                with torch.no_grad():
+                    nw = self.data_collections.net_weights
+                    nw.data.copy_(torch.as_tensor(
+                        _w, dtype=nw.dtype, device=nw.device))
+                logging.info("evoplace: deferred path-group net weights applied")
+
         # EvoPlace: delegate to an evolved gamma schedule when one is registered.
         # The hook returns a dimensionless gamma in [0.01, 20] (see
         # evolve/initial_program.py); internal gamma carries bin-size units, so
